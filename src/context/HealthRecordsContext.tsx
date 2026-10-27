@@ -6,11 +6,7 @@ import {
 } from '@/utils/attachmentFiles';
 
 
-import {
-  Directory,
-  File,
-  Paths,
-} from 'expo-file-system';
+import { File } from 'expo-file-system';
 
 import {
   createContext,
@@ -29,10 +25,19 @@ import {
   type HealthRecordCategory,
 } from '@/constants/healthRecords';
 
-import * as LegacyFileSystem from 'expo-file-system/legacy';
+import {
+  listHealthRecords as fetchServerRecords,
+  listRecordAttachments,
+  createHealthRecord as createServerRecord,
+  updateHealthRecord as updateServerRecord,
+  deleteHealthRecord as deleteServerRecord,
+  uploadRecordAttachment,
+  deleteRecordAttachment,
+} from '@/services/healthRecords';
+
 
 const STORAGE_KEY = '@medivault/health-records';
-const ATTACHMENTS_DIRECTORY = 'health-record-attachments';
+
 
 export type NewHealthRecord = Omit<HealthRecord, 'id' | 'initials'>;
 export type UpdateHealthRecord = Partial<NewHealthRecord>;
@@ -76,103 +81,6 @@ interface HealthRecordsProviderProps {
   children: ReactNode;
 }
 
-function getCategoryInitials(
-  category: HealthRecordCategory,
-): string {
-  switch (category) {
-    case 'Lab Results':
-      return 'LB';
-    case 'Prescriptions':
-      return 'RX';
-    case 'Reports':
-      return 'MR';
-    case 'Imaging':
-      return 'XR';
-  }
-}
-
-async function loadStoredRecords(): Promise<HealthRecord[]> {
-  const storedRecords = await AsyncStorage.getItem(STORAGE_KEY);
-
-  if (storedRecords !== null) {
-    const parsedRecords: unknown = JSON.parse(storedRecords);
-
-    if (!Array.isArray(parsedRecords)) {
-      throw new Error('Stored health records have an invalid format.');
-    }
-
-    // Older records may not have an attachments property.
-    return (parsedRecords as HealthRecord[]).map((record) => ({
-      ...record,
-      attachments: Array.isArray(record.attachments)
-        ? record.attachments
-        : [],
-    }));
-  }
-
-  const initialRecords = demoRecords.map((record) => ({
-    ...record,
-    attachments: [],
-  }));
-
-  await AsyncStorage.setItem(
-    STORAGE_KEY,
-    JSON.stringify(initialRecords),
-  );
-
-  return initialRecords;
-}
-
-function getAttachmentsDirectory(): Directory {
-  return new Directory(Paths.document, ATTACHMENTS_DIRECTORY);
-}
-
-function ensureAttachmentsDirectory(): Directory {
-  const directory = getAttachmentsDirectory();
-
-  if (!directory.exists) {
-    directory.create({
-      idempotent: true,
-      intermediates: true,
-    });
-  }
-
-  return directory;
-}
-
-function createAttachmentId(): string {
-  return `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
-}
-
-function safeFileName(name: string): string {
-  const cleaned = name
-    .replace(/[\\/]/g, '_')
-    .replace(/[^\w.\- ()]/g, '_')
-    .trim();
-
-  return cleaned || 'attachment';
-}
-
-async function copyAttachmentIntoApp(
-  sourceUri: string,
-  attachmentId: string,
-  originalName: string,
-): Promise<File> {
-  const directory = ensureAttachmentsDirectory();
-
-  const destinationName =
-    `${attachmentId}-${safeFileName(originalName)}`;
-
-  const destination = new File(directory, destinationName);
-
-  await LegacyFileSystem.copyAsync({
-    from: sourceUri,
-    to: destination.uri,
-  });
-
-  return destination;
-}
-
 async function persistRecords(
   records: HealthRecord[],
 ): Promise<void> {
@@ -200,14 +108,186 @@ export function HealthRecordsProvider({
     setError(null);
 
     try {
-      const storedRecords = await loadStoredRecords();
-      commitRecords(storedRecords);
+      const cachedJson = await AsyncStorage.getItem(STORAGE_KEY);
+
+      const parsedCache: unknown = cachedJson
+        ? JSON.parse(cachedJson)
+        : [];
+
+      if (!Array.isArray(parsedCache)) {
+        throw new Error('Stored health records have an invalid format.');
+      }
+
+      const cachedRecords = (parsedCache as HealthRecord[]).map(
+        (record) => ({
+          ...record,
+          attachments: Array.isArray(record.attachments)
+            ? record.attachments
+            : [],
+        }),
+      );
+
+      // Preserve the original local data before synchronizing.
+      if (cachedJson !== null) {
+        const backupKey = `${STORAGE_KEY}:pre-sync-backup`;
+        const existingBackup = await AsyncStorage.getItem(backupKey);
+
+        if (existingBackup === null) {
+          await AsyncStorage.setItem(backupKey, cachedJson);
+        }
+      }
+
+      let serverRecords = await fetchServerRecords();
+
+      const demoRecordIds = new Set(
+        demoRecords.map((record) => record.id),
+      );
+
+      const legacyRecords = cachedRecords.filter(
+        (record) => !demoRecordIds.has(record.id),
+      );
+
+      // Avoid duplicate migration attempts for records already on
+      // the server, including records from a previous interrupted sync.
+      const migratedClientIds = new Set(
+        serverRecords
+          .map((record) => record.clientRecordId)
+          .filter((id): id is string => Boolean(id)),
+      );
+
+      const serverIds = new Set(
+        serverRecords.map((record) => record.id),
+      );
+
+      for (const legacyRecord of legacyRecords) {
+        if (
+          serverIds.has(legacyRecord.id) ||
+          migratedClientIds.has(legacyRecord.id)
+        ) {
+          continue;
+        }
+
+        await createServerRecord(
+          {
+            title: legacyRecord.title,
+            subtitle: legacyRecord.subtitle,
+            category: legacyRecord.category,
+            date: legacyRecord.date,
+            description: legacyRecord.description,
+          },
+          legacyRecord.id,
+        );
+
+        // Prevent another cached entry from reusing the same key.
+        migratedClientIds.add(legacyRecord.id);
+      }
+
+      // Fetch again to get the authoritative MongoDB IDs.
+      serverRecords = await fetchServerRecords();
+
+      // Index the cache by both local IDs and known client IDs.
+      const cachedRecordsById = new Map<string, HealthRecord>();
+
+      for (const cachedRecord of cachedRecords) {
+        cachedRecordsById.set(cachedRecord.id, cachedRecord);
+
+        if (cachedRecord.clientRecordId) {
+          cachedRecordsById.set(
+            cachedRecord.clientRecordId,
+            cachedRecord,
+          );
+        }
+      }
+
+      const synchronizedRecords = await Promise.all(
+        serverRecords.map(async (serverRecord) => {
+          const cachedRecord =
+            cachedRecordsById.get(serverRecord.id) ??
+            (serverRecord.clientRecordId
+              ? cachedRecordsById.get(serverRecord.clientRecordId)
+              : undefined);
+
+          const cachedAttachments = cachedRecord?.attachments ?? [];
+
+          try {
+            // Retrieve the authoritative attachment metadata from the server.
+            const serverAttachments = await listRecordAttachments(
+              serverRecord.id,
+            );
+
+            // Preserve device-specific metadata that the server does not store.
+            const cachedAttachmentsById = new Map(
+              cachedAttachments.map((attachment) => [
+                attachment.id,
+                attachment,
+              ]),
+            );
+
+            const synchronizedAttachments = serverAttachments.map(
+              (serverAttachment) => {
+                const cachedAttachment = cachedAttachmentsById.get(
+                  serverAttachment.id,
+                );
+
+                return {
+                  ...cachedAttachment,
+                  ...serverAttachment,
+                  ...(cachedAttachment?.source
+                    ? { source: cachedAttachment.source }
+                    : {}),
+                  ...(serverAttachment.durationMs == null &&
+                  cachedAttachment?.durationMs !== undefined
+                    ? { durationMs: cachedAttachment.durationMs }
+                    : {}),
+                };
+              },
+            );
+
+            return {
+              ...serverRecord,
+              attachments: synchronizedAttachments,
+            };
+          } catch {
+            // If attachment retrieval fails, preserve the cached attachments
+            // for this record rather than failing the entire synchronization.
+            return {
+              ...serverRecord,
+              attachments: cachedAttachments,
+            };
+          }
+        }),
+      );
+
+      await persistRecords(synchronizedRecords);
+      commitRecords(synchronizedRecords);
     } catch (err) {
       setError(
         err instanceof Error
           ? err.message
-          : 'Unable to load health records.',
+          : 'Unable to synchronize health records.',
       );
+
+      // Preserve the local cache if the server is unreachable.
+      try {
+        const cachedJson = await AsyncStorage.getItem(STORAGE_KEY);
+
+        if (cachedJson !== null) {
+          const cachedRecords: unknown = JSON.parse(cachedJson);
+
+          if (Array.isArray(cachedRecords)) {
+            commitRecords(
+              (cachedRecords as HealthRecord[]).map((record) => ({
+                ...record,
+                attachments: Array.isArray(record.attachments)
+                  ? record.attachments
+                  : [],
+              })),
+            );
+          }
+        }
+      } catch {
+        // Keep the original synchronization error.
+      }
     } finally {
       setIsLoading(false);
     }
@@ -219,26 +299,39 @@ export function HealthRecordsProvider({
 
   const addRecord = useCallback(
     async (newRecord: NewHealthRecord): Promise<HealthRecord> => {
-      if (isLoading) {
+      if (isLoading || error) {
         throw new Error(
-          'Health records are still loading. Please try again.',
+          'Health records are not ready. Please synchronize and try again.',
         );
       }
 
-      if (error) {
-        throw new Error(
-          'Health records could not be loaded. Please retry before adding a record.',
-        );
-      }
+      // Generate a stable client ID so the backend can safely handle
+      // a retried create request without creating duplicate records.
+      const clientRecordId =
+        `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+
+      const createdRecord = await createServerRecord(
+        {
+          title: newRecord.title,
+          subtitle: newRecord.subtitle,
+          category: newRecord.category,
+          date: newRecord.date,
+          description: newRecord.description,
+        },
+        clientRecordId,
+      );
 
       const record: HealthRecord = {
-        ...newRecord,
-        attachments: newRecord.attachments ?? [],
-        id: `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`,
-        initials: getCategoryInitials(newRecord.category),
+        ...createdRecord,
+        attachments: [],
       };
 
-      const updatedRecords = [record, ...recordsRef.current];
+      const updatedRecords = [
+        record,
+        ...recordsRef.current.filter(
+          (item) => item.id !== record.id,
+        ),
+      ];
 
       await persistRecords(updatedRecords);
       commitRecords(updatedRecords);
@@ -253,41 +346,37 @@ export function HealthRecordsProvider({
       id: string,
       updates: UpdateHealthRecord,
     ): Promise<HealthRecord> => {
-      if (isLoading) {
+      if (isLoading || error) {
         throw new Error(
-          'Health records are still loading. Please try again.',
+          'Health records are not ready. Please synchronize and try again.',
         );
       }
 
-      if (error) {
-        throw new Error(
-          'Health records could not be loaded. Please retry before updating a record.',
-        );
-      }
-
-      const currentRecords = recordsRef.current;
-      const existingRecord = currentRecords.find(
+      const existingRecord = recordsRef.current.find(
         (record) => record.id === id,
       );
 
       if (!existingRecord) {
-        throw new Error(
-          'The health record you are trying to update was not found.',
-        );
+        throw new Error('The health record was not found.');
       }
 
+      // Attachments are managed through their own API endpoints.
+      const {
+        attachments: _ignoredAttachments,
+        ...recordUpdates
+      } = updates;
+
+      const updatedFromServer = await updateServerRecord(
+        id,
+        recordUpdates,
+      );
+
       const updatedRecord: HealthRecord = {
-        ...existingRecord,
-        ...updates,
-        id: existingRecord.id,
-        initials: getCategoryInitials(
-          updates.category ?? existingRecord.category,
-        ),
-        attachments:
-          updates.attachments ?? existingRecord.attachments ?? [],
+        ...updatedFromServer,
+        attachments: existingRecord.attachments ?? [],
       };
 
-      const updatedRecords = currentRecords.map((record) =>
+      const updatedRecords = recordsRef.current.map((record) =>
         record.id === id ? updatedRecord : record,
       );
 
@@ -301,38 +390,34 @@ export function HealthRecordsProvider({
 
   const deleteRecord = useCallback(
     async (id: string): Promise<void> => {
-      if (isLoading) {
+      if (isLoading || error) {
         throw new Error(
-          'Health records are still loading. Please try again.',
+          'Health records are not ready. Please synchronize and try again.',
         );
       }
 
-      if (error) {
-        throw new Error(
-          'Health records could not be loaded. Please retry before deleting a record.',
-        );
-      }
-
-      const currentRecords = recordsRef.current;
-      const existingRecord = currentRecords.find(
+      const existingRecord = recordsRef.current.find(
         (record) => record.id === id,
       );
 
       if (!existingRecord) {
-        throw new Error(
-          'The health record you are trying to delete was not found.',
-        );
+        throw new Error('The health record was not found.');
       }
 
-      const updatedRecords = currentRecords.filter(
+      // Delete from MongoDB first. If this fails, retain the local record.
+      await deleteServerRecord(id);
+
+      const updatedRecords = recordsRef.current.filter(
         (record) => record.id !== id,
       );
 
-      // Persist metadata before removing the associated physical files.
       await persistRecords(updatedRecords);
       commitRecords(updatedRecords);
 
+      // Clean up files stored locally on this device.
       for (const attachment of existingRecord.attachments ?? []) {
+        if (!attachment.uri) continue;
+
         try {
           const file = new File(attachment.uri);
 
@@ -340,15 +425,14 @@ export function HealthRecordsProvider({
             file.delete();
           }
         } catch {
-          // Metadata is already deleted. A leftover file can be
-          // cleaned up later.
+          // The server deletion succeeded; local cleanup can be retried.
         }
       }
     },
     [error, isLoading, commitRecords],
   );
 
-  const addAttachment = useCallback(
+ const addAttachment = useCallback(
     async (
       recordId: string,
       attachment: NewAttachment,
@@ -359,81 +443,70 @@ export function HealthRecordsProvider({
         );
       }
 
-      const initialRecord = recordsRef.current.find(
+      const existingRecord = recordsRef.current.find(
         (record) => record.id === recordId,
       );
 
-      if (!initialRecord) {
+      if (!existingRecord) {
         throw new Error('The health record was not found.');
       }
 
-      const attachmentId = createAttachmentId();
-      let copiedFile: File | undefined;
+      const mimeType = resolveMimeType(
+        attachment.name,
+        attachment.mimeType,
+      );
 
-            try {
-        const mimeType = resolveMimeType(
-          attachment.name,
-          attachment.mimeType,
-        );
+      const name = ensureFileNameExtension(
+        attachment.name,
+        mimeType,
+      );
 
-        const name = ensureFileNameExtension(attachment.name, mimeType);
-
-        copiedFile = await copyAttachmentIntoApp(
-          attachment.uri,
-          attachmentId,
+      const uploadedAttachment = await uploadRecordAttachment(
+        recordId,
+        {
           name,
-        );
-
-        const savedAttachment: HealthRecordAttachment = {
-          ...attachment,
-          name,
+          uri: attachment.uri,
           mimeType,
-          id: attachmentId,
-          uri: copiedFile.uri,
-          addedAt: new Date().toISOString(),
-        };
-        
-        // Re-read the latest records after the file copy. The record
-        // could have changed while the asynchronous operation ran.
-        const currentRecords = recordsRef.current;
-        const currentRecord = currentRecords.find(
-          (record) => record.id === recordId,
+          size: attachment.size,
+          type: attachment.type,
+          ...(attachment.durationMs !== undefined
+            ? { durationMs: attachment.durationMs }
+            : {}),
+        },
+      );
+
+      const savedAttachment: HealthRecordAttachment = {
+        ...uploadedAttachment,
+        source: attachment.source,
+      };
+
+      const currentRecords = recordsRef.current;
+      const currentRecord = currentRecords.find(
+        (record) => record.id === recordId,
+      );
+
+      if (!currentRecord) {
+        throw new Error(
+          'The health record no longer exists. Refresh your records.',
         );
-
-        if (!currentRecord) {
-          throw new Error(
-            'The health record no longer exists. The attachment was not saved.',
-          );
-        }
-
-        const updatedRecord: HealthRecord = {
-          ...currentRecord,
-          attachments: [
-            ...(currentRecord.attachments ?? []),
-            savedAttachment,
-          ],
-        };
-
-        const updatedRecords = currentRecords.map((record) =>
-          record.id === recordId ? updatedRecord : record,
-        );
-
-        // Save metadata first. If persistence fails, remove the copied file.
-        await persistRecords(updatedRecords);
-        commitRecords(updatedRecords);
-
-        return savedAttachment;
-      } catch (err) {
-        try {
-          if (copiedFile?.exists) {
-            copiedFile.delete();
-          }
-        } catch {
-          // Preserve the original error.
-        }
-
-        throw err;
       }
+
+      const updatedRecord: HealthRecord = {
+        ...currentRecord,
+        attachments: [
+          ...(currentRecord.attachments ?? []),
+          savedAttachment,
+        ],
+      };
+
+      const updatedRecords = currentRecords.map((record) =>
+        record.id === recordId ? updatedRecord : record,
+      );
+
+      await persistRecords(updatedRecords);
+      commitRecords(updatedRecords);
+
+      return savedAttachment;
     },
     [error, isLoading, commitRecords],
   );
@@ -450,6 +523,7 @@ export function HealthRecordsProvider({
       }
 
       const currentRecords = recordsRef.current;
+
       const existingRecord = currentRecords.find(
         (record) => record.id === recordId,
       );
@@ -458,37 +532,44 @@ export function HealthRecordsProvider({
         throw new Error('The health record was not found.');
       }
 
-      const attachment = (existingRecord.attachments ?? []).find(
-        (item) => item.id === attachmentId,
-      );
+      const attachment = (
+        existingRecord.attachments ?? []
+      ).find((item) => item.id === attachmentId);
 
       if (!attachment) {
         throw new Error('The attachment was not found.');
       }
 
+      // Delete remote attachments through the authenticated API.
+      if (!attachment.uri) {
+        await deleteRecordAttachment(recordId, attachmentId);
+      }
+
       const updatedRecord: HealthRecord = {
         ...existingRecord,
-        attachments: (existingRecord.attachments ?? []).filter(
-          (item) => item.id !== attachmentId,
-        ),
+        attachments: (
+          existingRecord.attachments ?? []
+        ).filter((item) => item.id !== attachmentId),
       };
 
       const updatedRecords = currentRecords.map((record) =>
         record.id === recordId ? updatedRecord : record,
       );
 
-      // Do not remove the physical file until metadata has been saved.
       await persistRecords(updatedRecords);
       commitRecords(updatedRecords);
 
-      try {
-        const file = new File(attachment.uri);
+      // Remove legacy files from the device when applicable.
+      if (attachment.uri) {
+        try {
+          const file = new File(attachment.uri);
 
-        if (file.exists) {
-          file.delete();
+          if (file.exists) {
+            file.delete();
+          }
+        } catch {
+          // Preserve the successful metadata update.
         }
-      } catch {
-        // Metadata is removed. A leftover file can be cleaned up later.
       }
     },
     [error, isLoading, commitRecords],

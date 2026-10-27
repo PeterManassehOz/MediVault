@@ -16,10 +16,12 @@ import {
 
 import { useHealthRecords } from '@/context/HealthRecordsContext';
 import type { HealthRecordAttachment } from '@/constants/healthRecords';
+import { getAttachmentAccess } from '@/services/healthRecords';
 import {
   useAudioPlayer,
   useAudioPlayerStatus,
 } from 'expo-audio';
+import { RemoteAttachmentImage } from '@/components/RemoteAttachmentImage';
 
 
 const categoryColors = {
@@ -64,17 +66,63 @@ function formatAudioDuration(durationMs?: number): string {
 
 function AudioAttachmentPlayer({
   attachment,
+  recordId,
+  onError,
 }: {
   attachment: HealthRecordAttachment;
+  recordId: string;
+  onError: (message: string) => void;
 }) {
-  const player = useAudioPlayer(attachment.uri);
+  const player = useAudioPlayer(null);
   const status = useAudioPlayerStatus(player);
 
-  const handleTogglePlayback = () => {
+  const [isLoadingAudio, setIsLoadingAudio] = useState(false);
+
+  const handleTogglePlayback = async () => {
     if (status.playing) {
       player.pause();
-    } else {
+      return;
+    }
+
+    if (isLoadingAudio) {
+      return;
+    }
+
+    setIsLoadingAudio(true);
+
+    try {
+      if (!attachment.uri) {
+        const { url } = await getAttachmentAccess(
+          recordId,
+          attachment.id,
+        );
+
+        if (!url) {
+          throw new Error(
+            'The server did not return an audio access URL.',
+          );
+        }
+
+        player.replace(url);
+      } else {
+        player.replace(attachment.uri);
+      }
+
       player.play();
+    } catch (err) {
+      console.error(
+        '[MediVault] Could not play audio attachment:',
+        attachment.name,
+        err,
+      );
+
+      onError(
+        err instanceof Error
+          ? `Could not play "${attachment.name}". ${err.message}`
+          : `Could not play "${attachment.name}". Please try again.`,
+      );
+    } finally {
+      setIsLoadingAudio(false);
     }
   };
 
@@ -106,18 +154,25 @@ function AudioAttachmentPlayer({
         accessibilityLabel={
           status.playing ? 'Pause voice note' : 'Play voice note'
         }
-        onPress={handleTogglePlayback}
+        disabled={isLoadingAudio}
+        onPress={() => void handleTogglePlayback()}
         className="ml-3 h-11 w-11 items-center justify-center rounded-full bg-emerald-700"
       >
-        <Ionicons
-          name={status.playing ? 'pause' : 'play'}
-          size={20}
-          color="#FFFFFF"
-        />
+        {isLoadingAudio ? (
+          <ActivityIndicator size="small" color="#FFFFFF" />
+        ) : (
+          <Ionicons
+            name={status.playing ? 'pause' : 'play'}
+            size={20}
+            color="#FFFFFF"
+          />
+        )}
       </Pressable>
     </View>
   );
 }
+
+
 
 export default function RecordDetailsScreen() {
   const router = useRouter();
@@ -168,53 +223,85 @@ export default function RecordDetailsScreen() {
   };
 
   const handleOpenAttachment = async (
-    attachment: HealthRecordAttachment,
-  ) => {
-    setAttachmentError('');
-    setOpeningAttachmentId(attachment.id);
+  attachment: HealthRecordAttachment,
+) => {
+  setAttachmentError('');
+  setOpeningAttachmentId(attachment.id);
 
-    try {
-      if (attachment.type === 'image') {
+  try {
+    if (attachment.type === 'image') {
+      if (attachment.uri) {
         setSelectedImage(attachment);
         return;
       }
 
-            await shareAttachment(attachment);
-    } catch (err) {
-      console.error(
-        '[MediVault] Could not open attachment:',
-        attachment.name,
-        err,
+      if (!record) {
+        throw new Error('The health record could not be found.');
+      }
+
+      const { url } = await getAttachmentAccess(
+        record.id,
+        attachment.id,
       );
 
-      setAttachmentError(
-        err instanceof Error
-          ? `Could not open "${attachment.name}". ${err.message}`
-          : `Could not open "${attachment.name}". Please try again.`,
-      );
-    } finally {
-      setOpeningAttachmentId(null);
+      if (!url) {
+        throw new Error(
+          'The server did not return an image access URL.',
+        );
+      }
+
+      setSelectedImage({
+        ...attachment,
+        uri: url,
+      });
+
+      return;
     }
-  };
 
+    await shareAttachment(
+      attachment,
+      record?.id,
+    );
+  } catch (err) {
+    console.error(
+      '[MediVault] Could not open attachment:',
+      attachment.name,
+      err,
+    );
+
+    setAttachmentError(
+      err instanceof Error
+        ? `Could not open "${attachment.name}". ${err.message}`
+        : `Could not open "${attachment.name}". Please try again.`,
+    );
+  } finally {
+    setOpeningAttachmentId(null);
+  }
+};
   
-    const handleShareAttachment = async (
-    attachment: HealthRecordAttachment,
-  ) => {
-    try {
-      await shareAttachment(attachment);
-    } catch (err) {
-      console.error('[MediVault] Sharing failed:', err);
+  const handleShareAttachment = async (
+  attachment: HealthRecordAttachment,
+) => {
+  try {
+    await shareAttachment(
+      attachment,
+      record?.id,
+    );
+  } catch (err) {
+    console.error(
+      '[MediVault] Sharing failed:',
+      attachment.name,
+      err,
+    );
 
-      Alert.alert(
-        'Unable to share',
-        err instanceof Error
-          ? err.message
-          : 'The saved file could not be shared. Please check that it is still available.',
-      );
-    }
-  };
-
+    Alert.alert(
+      'Unable to share',
+      err instanceof Error
+        ? err.message
+        : 'The saved file could not be shared. Please try again.',
+    );
+  }
+};
   const record = id ? getRecordById(id) : undefined;
 
   const handleDelete = async () => {
@@ -585,6 +672,8 @@ export default function RecordDetailsScreen() {
                     <AudioAttachmentPlayer
                       key={attachment.id}
                       attachment={attachment}
+                      recordId={record.id}
+                      onError={setAttachmentError}
                     />
                   );
                 }
@@ -606,18 +695,22 @@ export default function RecordDetailsScreen() {
                       onPress={() => void handleOpenAttachment(attachment)}
                       className="flex-row items-center p-4 active:bg-[#F8FAFC]"
                     >
-                      {isImage ? (
-                        <Image
-                          source={{ uri: attachment.uri }}
-                          className="h-16 w-16 rounded-xl bg-[#F2F4F7]"
-                          resizeMode="cover"
-                          onError={() => {
-                            setAttachmentError(
-                              `The image "${attachment.name}" could not be displayed. Its saved file may no longer be available.`,
-                            );
-                          }}
-                        />
-                      ) : (
+                                            {isImage ? (
+                          <View className="h-16 w-16 overflow-hidden rounded-xl bg-[#F2F4F7]">
+                            <RemoteAttachmentImage
+                              recordId={record.id}
+                              attachmentId={attachment.id}
+                              uri={attachment.uri}
+                              resizeMode="cover"
+                              className="h-16 w-16 rounded-xl"
+                              onError={() => {
+                                setAttachmentError(
+                                  `The image "${attachment.name}" could not be displayed.`,
+                                );
+                              }}
+                            />
+                          </View>
+                        ) : (
                         <View className="h-16 w-16 items-center justify-center rounded-xl bg-emerald-50">
                           <Ionicons
                             name="document-text-outline"
@@ -732,12 +825,24 @@ export default function RecordDetailsScreen() {
 
             {selectedImage ? (
               <>
-                <Image
-                  source={{ uri: selectedImage.uri }}
-                  className="h-[75%] w-full"
-                  resizeMode="contain"
-                />
-
+                {selectedImage.uri ? (
+                  <Image
+                    source={{ uri: selectedImage.uri }}
+                    className="h-[75%] w-full"
+                    resizeMode="contain"
+                    onError={() => {
+                      setAttachmentError(
+                        `The image "${selectedImage.name}" could not be displayed.`,
+                      );
+                    }}
+                  />
+                ) : (
+                  <View className="h-[75%] w-full items-center justify-center">
+                    <Text className="text-sm text-white">
+                      Image unavailable.
+                    </Text>
+                  </View>
+                )}
                 <Text
                   numberOfLines={2}
                   className="mx-6 mt-4 text-center text-sm font-semibold text-white"

@@ -1,6 +1,9 @@
+
 import { File, Paths } from 'expo-file-system';
 import * as LegacyFileSystem from 'expo-file-system/legacy';
 import * as Sharing from 'expo-sharing';
+
+import { getAttachmentAccess } from '@/services/healthRecords';
 
 const MIME_BY_EXTENSION: Record<string, string> = {
   pdf: 'application/pdf',
@@ -20,6 +23,14 @@ const MIME_BY_EXTENSION: Record<string, string> = {
   heic: 'image/heic',
   heif: 'image/heif',
   gif: 'image/gif',
+  m4a: 'audio/mp4',
+  mp4: 'audio/mp4',
+  aac: 'audio/aac',
+  mp3: 'audio/mpeg',
+  wav: 'audio/wav',
+  ogg: 'audio/ogg',
+  opus: 'audio/opus',
+  '3gp': 'audio/3gpp',
 };
 
 const EXTENSION_BY_MIME: Record<string, string> = {
@@ -39,6 +50,14 @@ const EXTENSION_BY_MIME: Record<string, string> = {
   'image/heic': 'heic',
   'image/heif': 'heif',
   'image/gif': 'gif',
+  'audio/mp4': 'm4a',
+  'audio/aac': 'aac',
+  'audio/mpeg': 'mp3',
+  'audio/wav': 'wav',
+  'audio/x-wav': 'wav',
+  'audio/ogg': 'ogg',
+  'audio/opus': 'opus',
+  'audio/3gpp': '3gp',
 };
 
 function getExtension(name: string): string | null {
@@ -60,11 +79,6 @@ function sanitizeFileName(name: string): string {
   );
 }
 
-/**
- * Returns a usable MIME type. If the picker reported nothing useful
- * (missing, "*\/*" or application/octet-stream), derive it from the
- * file extension instead.
- */
 export function resolveMimeType(
   name: string,
   mimeType: string | null | undefined,
@@ -88,11 +102,6 @@ export function resolveMimeType(
   );
 }
 
-/**
- * Guarantees a known extension on the file name. If the name already
- * ends in a recognised extension it is left alone; otherwise the
- * extension that matches the MIME type is appended.
- */
 export function ensureFileNameExtension(
   name: string,
   mimeType: string | null | undefined,
@@ -108,49 +117,155 @@ export function ensureFileNameExtension(
   return expected ? `${name}.${expected}` : name;
 }
 
-/**
- * Shares a stored attachment with a correct file name and MIME type.
- * Works for attachments saved before this fix too, as long as the
- * stored name or MIME type still identifies the file type.
- */
-export async function shareAttachment(attachment: {
+type ShareableAttachment = {
+  id: string;
   name: string;
   uri: string;
   mimeType: string;
-}): Promise<void> {
+  type?: 'document' | 'image' | 'audio';
+};
+
+function isRemoteUri(uri: string): boolean {
+  return /^https?:\/\//i.test(uri);
+}
+
+function getShareTargetName(
+  name: string,
+  mimeType: string,
+): string {
+  return sanitizeFileName(ensureFileNameExtension(name, mimeType));
+}
+
+/**
+ * Resolves a local or private server attachment to a local file,
+ * then shares a correctly named copy.
+ *
+ * Supply recordId for server attachments whose uri is empty.
+ */
+
+export async function shareAttachment(
+  attachment: ShareableAttachment,
+  recordId?: string,
+): Promise<void> {
   if (!(await Sharing.isAvailableAsync())) {
     throw new Error('Sharing is not available on this device.');
   }
 
-  const source = new File(attachment.uri);
-
-  if (!source.exists) {
-    throw new Error(
-      'The attachment file could not be found on this device.',
-    );
-  }
-
-  const mimeType = resolveMimeType(attachment.name, attachment.mimeType);
-
-  const shareName = sanitizeFileName(
-    ensureFileNameExtension(attachment.name, mimeType),
+  const mimeType = resolveMimeType(
+    attachment.name,
+    attachment.mimeType,
   );
 
-  // Share a copy that has the correct name, so receiving apps see a
-  // real extension instead of an extension-less (or ID-prefixed) file.
-  const target = new File(Paths.cache, shareName);
-
-  if (target.exists) {
-    target.delete();
-  }
-
-  await LegacyFileSystem.copyAsync({
-    from: source.uri,
-    to: target.uri,
-  });
-
-  await Sharing.shareAsync(target.uri, {
+  const shareName = getShareTargetName(
+    attachment.name,
     mimeType,
-    dialogTitle: shareName,
-  });
+  );
+
+  let downloadedFileUri: string | null = null;
+  let shareCopyUri: string | null = null;
+
+  try {
+    let sourceUri = attachment.uri;
+
+    // Resolve private server attachments through a temporary access URL.
+    if (!sourceUri || isRemoteUri(sourceUri)) {
+      if (!sourceUri && !recordId) {
+        throw new Error(
+          'The record ID is required to access this server attachment.',
+        );
+      }
+
+      if (!sourceUri) {
+        const access = await getAttachmentAccess(
+          recordId!,
+          attachment.id,
+        );
+
+        if (!access.url) {
+          throw new Error(
+            'The server did not provide an attachment access URL.',
+          );
+        }
+
+        sourceUri = access.url;
+      }
+
+      const downloadName = `${Date.now()}-${shareName}`;
+      const downloadedFile = new File(
+        Paths.cache,
+        downloadName,
+      );
+
+      if (downloadedFile.exists) {
+        downloadedFile.delete();
+      }
+
+      // Track the destination before downloading so the finally
+      // block can remove it even if the download fails partway.
+      downloadedFileUri = downloadedFile.uri;
+
+      const download = await LegacyFileSystem.downloadAsync(
+        sourceUri,
+        downloadedFile.uri,
+      );
+
+      if (download.status < 200 || download.status >= 300) {
+        throw new Error(
+          `The attachment download failed (HTTP ${download.status}).`,
+        );
+      }
+
+      downloadedFileUri = download.uri;
+      sourceUri = download.uri;
+    }
+
+    const source = new File(sourceUri);
+
+    if (!source.exists) {
+      throw new Error(
+        'The attachment file could not be found on this device.',
+      );
+    }
+
+    const target = new File(
+      Paths.cache,
+      `${Date.now()}-${shareName}`,
+    );
+
+    if (target.exists) {
+      target.delete();
+    }
+
+    shareCopyUri = target.uri;
+
+    await LegacyFileSystem.copyAsync({
+      from: source.uri,
+      to: target.uri,
+    });
+
+    await Sharing.shareAsync(target.uri, {
+      mimeType,
+      dialogTitle: shareName,
+    });
+  } finally {
+    // Delete only the temporary files created by this function.
+    // Never delete the original local attachment.
+    for (const uri of [shareCopyUri, downloadedFileUri]) {
+      if (!uri) continue;
+
+      try {
+        const file = new File(uri);
+
+        if (file.exists) {
+          file.delete();
+        }
+      } catch (error) {
+        console.warn(
+          'Could not remove a temporary attachment file:',
+          error,
+        );
+      }
+    }
+  }
 }
+

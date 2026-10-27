@@ -28,6 +28,10 @@ import {
   saveAuthToken,
 } from "@/utils/authStorage";
 
+import {
+  clearAttachmentAccessCache,
+} from "@/utils/attachmentAccessCache";
+
 type AuthContextValue = {
   user: AuthUser | null;
   isLoading: boolean;
@@ -105,6 +109,9 @@ export function AuthProvider({ children }: AuthProviderProps) {
   );
 
   const logout = useCallback(async () => {
+    // Clear sensitive in-memory attachment URLs immediately.
+    clearAttachmentAccessCache();
+
     await removeAuthToken();
     setUser(null);
   }, []);

@@ -409,7 +409,7 @@ export default function HomeScreen() {
           </View>
 
           {/* Privacy notice */}
-          <View className="mt-6 rounded-2xl border border-[#E5E7EB] bg-white p-4">
+          <View className="mt-6 rounded-2xl border border-[#E5E7EB] bg-white p-4 mb-10">
             <View className="flex-row items-center">
               <Ionicons
                 name="lock-closed-outline"
@@ -423,10 +423,7 @@ export default function HomeScreen() {
             </View>
 
             <Text className="mt-2 text-[13px] leading-5 text-[#667085]">
-              Records are currently stored locally on this device. AsyncStorage
-              is not encrypted, so implement encrypted storage, authentication,
-              and access controls before using real sensitive medical
-              information.
+              Records are stored in a database, and you can request for it anytime you deem necessary.
             </Text>
           </View>
         </View>

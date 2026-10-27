@@ -3,7 +3,7 @@ import { getAuthToken } from "@/utils/authStorage";
 
 const API_BASE_URL =
   process.env.EXPO_PUBLIC_API_URL ??
-  "http://10.232.58.60:5000/api/v1";
+  "http://10.57.63.60:5000/api/v1";
 
 export class ApiError extends Error {
   status: number;
@@ -13,7 +13,7 @@ export class ApiError extends Error {
     message: string,
     status: number,
     code?: string,
-  ) {
+  ) { 
     super(message);
     this.name = "ApiError";
     this.status = status;

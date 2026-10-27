@@ -12,6 +12,9 @@ import { Ionicons } from "@expo/vector-icons";
 import { useRouter } from "expo-router";
 
 import { useAuth } from "@/context/AuthContext";
+import { useAppLock } from "@/context/AppLockContext";
+
+
 
 const settingsSections = [
   {
@@ -24,7 +27,7 @@ const settingsSections = [
         title: "Biometric unlock",
         subtitle: "Fingerprint or device biometrics",
         message:
-          "Biometric authentication will be implemented in the device-security phase.",
+          "Require biometric verification to unlock your health vault.",
       },
       {
         id: "app-lock",
@@ -32,7 +35,7 @@ const settingsSections = [
         title: "App lock",
         subtitle: "Protect access to your vault",
         message:
-          "App-lock controls will be implemented alongside device security.",
+          "Lock MediVault immediately and require biometric verification.",
       },
     ],
   },
@@ -82,6 +85,83 @@ export default function ProfileScreen() {
 
   const router = useRouter();
   const { user, logout } = useAuth();
+
+  const {
+  isBiometricEnabled,
+  isAuthenticating,
+  enableBiometricUnlock,
+  disableBiometricUnlock,
+  lockNow,
+} = useAppLock();
+
+async function enableBiometrics() {
+  try {
+    await enableBiometricUnlock();
+    setNotice(
+      "Biometric unlock is enabled. MediVault will lock after 30 seconds in the background.",
+    );
+  } catch (error) {
+    Alert.alert(
+      "Biometric unlock not enabled",
+      error instanceof Error
+        ? error.message
+        : "Unable to enable biometric unlock.",
+    );
+  }
+}
+
+async function disableBiometrics() {
+  try {
+    await disableBiometricUnlock();
+    setNotice("Biometric unlock has been disabled.");
+  } catch {
+    Alert.alert(
+      "Unable to disable biometric unlock",
+      "Please try again.",
+    );
+  }
+}
+
+function handleBiometricToggle(nextEnabled: boolean) {
+  if (isAuthenticating) {
+    return;
+  }
+
+  if (nextEnabled) {
+    void enableBiometrics();
+    return;
+  }
+
+  Alert.alert(
+    "Disable biometric unlock?",
+    "MediVault will no longer require biometric verification when reopening the app.",
+    [
+      {
+        text: "Cancel",
+        style: "cancel",
+      },
+      {
+        text: "Disable",
+        style: "destructive",
+        onPress: () => {
+          void disableBiometrics();
+        },
+      },
+    ],
+  );
+}
+
+  function handleImmediateLock() {
+    if (!isBiometricEnabled) {
+      setNotice(
+        "Enable biometric unlock before using the immediate-lock feature.",
+      );
+      return;
+    }
+
+    setNotice("");
+    lockNow();
+  }
 
   async function handleLogout() {
     Alert.alert(
@@ -287,17 +367,62 @@ export default function ProfileScreen() {
                     ) : null}
 
                     <Pressable
-                      accessibilityRole="button"
+                      accessibilityRole={
+                        item.id === "biometrics" ? "switch" : "button"
+                      }
+                      accessibilityState={
+                        item.id === "biometrics"
+                          ? { checked: isBiometricEnabled }
+                          : undefined
+                      }
                       accessibilityLabel={`${item.title}. ${item.subtitle}`}
-                      onPress={() => setNotice(item.message)}
+                      disabled={
+                        item.id === "biometrics" && isAuthenticating
+                      }
+                      onPress={() => {
+                        if (item.id === "biometrics") {
+                          handleBiometricToggle(!isBiometricEnabled);
+                          return;
+                        }
+
+                        if (item.id === "app-lock") {
+                          handleImmediateLock();
+                          return;
+                        }
+
+                        setNotice(item.message);
+                      }}
                       className="flex-row items-center p-4 active:bg-[#F8FAFC]"
                     >
                       <View className="mr-3 h-10 w-10 items-center justify-center rounded-xl bg-emerald-50">
-                        <Ionicons
-                          name={item.icon as IoniconName}
-                          size={21}
-                          color="#047857"
-                        />
+                        {item.id === "biometrics" ? (
+                          <View
+                            className={`h-7 w-12 justify-center rounded-full px-1 ${
+                              isBiometricEnabled
+                                ? "bg-emerald-600"
+                                : "bg-[#D0D5DD]"
+                            }`}
+                          >
+                            <View
+                              className={`h-5 w-5 rounded-full bg-white ${
+                                isBiometricEnabled
+                                  ? "self-end"
+                                  : "self-start"
+                              }`}
+                            />
+                          </View>
+                        ) : (
+                          <Ionicons
+                            name={
+                              item.id === "app-lock" && isBiometricEnabled
+                                ? "lock-closed-outline"
+                                : "chevron-forward"
+                            }
+                            size={19}
+                            color="#98A2B3"
+                            style={{ marginLeft: 8 }}
+                          />
+                        )}
                       </View>
 
                       <View className="flex-1">
@@ -412,7 +537,7 @@ export default function ProfileScreen() {
 
             <Text className="flex-1 text-xs leading-5 text-[#98A2B3]">
               Keep your sign-in credentials private. Biometric unlock
-              and additional app-lock controls are planned for a later phase.
+              protects access to your vault on this device.
             </Text>
           </View>
         </View>

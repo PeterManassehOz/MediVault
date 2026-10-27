@@ -40,7 +40,13 @@
           "microphonePermission": "MediVault uses the microphone to record voice notes attached to your health records."
         }
       ],
-      "expo-secure-store"
+      "expo-secure-store",
+      [
+        "expo-local-authentication",
+        {
+          "faceIDPermission": "Allow MediVault to use Face ID to unlock your health vault."
+        }
+      ]
     ],
     "experiments": {
       "typedRoutes": true,

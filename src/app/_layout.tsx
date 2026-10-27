@@ -18,6 +18,13 @@ import "../global.css";
 import { useSegments } from "expo-router";
 
 import { AuthProvider, useAuth } from "@/context/AuthContext";
+import { 
+  AppLockProvider,
+  useAppLock,
+ } from "@/context/AppLockContext";
+import AppLockScreen from "@/components/security/AppLockScreen";
+
+
 
 void SplashScreen.preventAutoHideAsync();
 
@@ -37,17 +44,24 @@ const mediVaultTheme = {
 
 
 
+
 function AuthGuard() {
   const { user, isLoading } = useAuth();
+  const {
+    isReady: isAppLockReady,
+    isLocked,
+  } = useAppLock();
+
   const segments = useSegments();
   const router = useRouter();
 
   useEffect(() => {
-    if (isLoading) {
+    if (isLoading || !isAppLockReady) {
       return;
     }
 
     const currentRoute = segments[0];
+
     const isAuthRoute =
       currentRoute === "login" ||
       currentRoute === "register";
@@ -57,13 +71,31 @@ function AuthGuard() {
       return;
     }
 
-    if (user && isAuthRoute) {
+    if (user && isLocked && currentRoute !== "locked") {
+      router.replace("/locked");
+      return;
+    }
+
+    if (user && !isLocked && currentRoute === "locked") {
+      router.replace("/(tabs)");
+      return;
+    }
+
+    if (user && !isLocked && isAuthRoute) {
       router.replace("/(tabs)");
     }
-  }, [user, isLoading, segments, router]);
+  }, [
+    user,
+    isLoading,
+    isAppLockReady,
+    isLocked,
+    segments,
+    router,
+  ]);
 
   return null;
 }
+
 
 
 export default function RootLayout() {
@@ -71,18 +103,22 @@ export default function RootLayout() {
     void SplashScreen.hideAsync();
   }, []);
 
-  return (
-    <ThemeProvider value={mediVaultTheme}>
-      <AuthProvider>
+
+return (
+  <ThemeProvider value={mediVaultTheme}>
+    <AuthProvider>
+      <AppLockProvider>
         <HealthRecordsProvider>
           <AuthGuard />
           <StatusBar style="dark" />
           <RootNavigator />
+          <AppLockScreen />
         </HealthRecordsProvider>
-      </AuthProvider>
-    </ThemeProvider>
-  );
-}
+      </AppLockProvider>
+    </AuthProvider>
+  </ThemeProvider>
+);
+
 
 function RootNavigator() {
   const router = useRouter();
@@ -172,6 +208,14 @@ function RootNavigator() {
         name="register"
         options={{ headerShown: false }}
       />
+      <Stack.Screen
+  name="locked"
+  options={{
+    headerShown: false,
+    gestureEnabled: false,
+  }}
+/>
     </Stack>
   );
+}
 }

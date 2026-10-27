@@ -24,6 +24,7 @@ export type HealthRecordAttachment = {
 
 export type HealthRecord = {
   id: string;
+  clientRecordId?: string;
   title: string;
   subtitle: string;
   category: HealthRecordCategory;

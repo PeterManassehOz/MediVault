@@ -2,16 +2,13 @@ import { useState, type ComponentProps } from 'react';
 
 import { Ionicons } from '@expo/vector-icons';
 import {
-  Directory,
   File,
-  Paths,
 } from 'expo-file-system';
 import * as ImagePicker from 'expo-image-picker';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import {
   ActivityIndicator,
   Alert,
-  Image,
   KeyboardAvoidingView,
   Platform,
   Pressable,
@@ -30,7 +27,7 @@ import {
   useHealthRecords,
   type NewAttachment,
 } from '@/context/HealthRecordsContext';
-
+import { RemoteAttachmentImage } from '@/components/RemoteAttachmentImage';
 
 type IoniconName = ComponentProps<typeof Ionicons>['name'];
 
@@ -999,10 +996,10 @@ export default function EditRecordScreen() {
                     key={attachment.id}
                     className="overflow-hidden rounded-xl border border-[#E4E7EC]"
                   >
-                    <Image
-                      source={{
-                        uri: attachment.uri,
-                      }}
+                    <RemoteAttachmentImage
+                      recordId={record.id}
+                      attachmentId={attachment.id}
+                      uri={attachment.uri}
                       resizeMode="cover"
                       className="h-40 w-full bg-[#F2F4F7]"
                     />

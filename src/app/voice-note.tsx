@@ -135,14 +135,40 @@ export default function VoiceNoteScreen() {
 
       await recorder.stop();
 
+      
       const uri = recorder.uri;
 
       if (!uri) {
         throw new Error('The recording file was not created.');
       }
 
+      const recordingFile = new File(uri);
+      const fileBytes = new Uint8Array(
+        await recordingFile.arrayBuffer(),
+      );
+
+      const firstBytesHex = Array.from(fileBytes.slice(0, 16))
+        .map((byte) => byte.toString(16).padStart(2, '0'))
+        .join(' ');
+
+      const containerBrand =
+        fileBytes.length >= 12 &&
+        String.fromCharCode(...fileBytes.slice(4, 8)) === 'ftyp'
+          ? String.fromCharCode(...fileBytes.slice(8, 12))
+          : null;
+
+      console.info('[MediVault] Recorder output diagnostics:', {
+        uri,
+        filename: recordingFile.name,
+        fileSize: recordingFile.size,
+        fileType: recordingFile.type,
+        firstBytesHex,
+        containerBrand,
+      });
+
       setRecordedUri(uri);
       setSavedDurationMs(durationMs);
+
 
       await setAudioModeAsync({
         allowsRecording: false,
